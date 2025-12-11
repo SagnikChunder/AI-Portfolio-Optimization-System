@@ -16,7 +16,7 @@ from dash.exceptions import PreventUpdate
 STOCK_UNIVERSE = {
     "Technology": ["AAPL", "MSFT", "NVDA", "ADBE", "INTC"],
     "Finance": ["JPM", "BAC", "C", "WFC", "GS"],
-    "Energy": ["XOM", "CVX", "BP", "TTE", "COP"], 
+    "Energy": ["XOM", "CVX", "BP", "TTE", "COP"],
     "Consumer": ["AMZN", "WMT", "PG", "KO", "MCD"]
 }
 
@@ -24,25 +24,18 @@ STOCK_UNIVERSE = {
 # Utility: fetch market data
 # -----------------------------
 def get_market_data(tickers, period="1y", interval="1d"):
-    """
-    Download adjusted close prices for given tickers using yfinance.
-    Returns DataFrame indexed by date with columns equal to tickers.
-    """
     if not tickers:
         return pd.DataFrame()
 
     try:
         df = yf.download(tickers, period=period, interval=interval, progress=False)
         
-        # Handle MultiIndex columns (common for multi-ticker download)
         if isinstance(df.columns, pd.MultiIndex):
-            # Prioritize Adj Close, fall back to Close
             if 'Adj Close' in df.columns.get_level_values(0):
                 df = df['Adj Close']
             elif 'Close' in df.columns.get_level_values(0):
                 df = df['Close']
         else:
-            # Handle single ticker flat DataFrame
             if 'Adj Close' in df.columns:
                 df = df[['Adj Close']]
             elif 'Close' in df.columns:
@@ -52,7 +45,6 @@ def get_market_data(tickers, period="1y", interval="1d"):
         print(f"yfinance download error: {e}")
         return pd.DataFrame()
 
-    # Ensure it's a DataFrame and columns are named after tickers
     if isinstance(df, pd.Series):
         df = df.to_frame()
         if len(tickers) == 1:
@@ -84,7 +76,6 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
     if returns.empty:
         return None, None, None, None, None
 
-    # Use actual columns from data, as some tickers might have failed to download
     used_tickers = list(data.columns)
     trading_days = 252
     mean_returns = returns.mean().values * trading_days
@@ -102,10 +93,10 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
 
     port_returns = np.dot(weights, mean_returns)
     port_variance = np.sum(np.dot(weights, cov_matrix) * weights, axis=1)
-    port_std = np.sqrt(np.maximum(port_variance, 0)) 
+    port_std = np.sqrt(np.maximum(port_variance, 0))
     port_std = np.where(port_std == 0, 1e-9, port_std)
 
-    risk_free = 0.04 
+    risk_free = 0.04
     sharpe_ratios = (port_returns - risk_free) / port_std
 
     results = {
@@ -139,8 +130,8 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
 # Build Dash app layout
 # -----------------------------
 app = Dash(__name__)
-# EXPOSE SERVER FOR DEPLOYMENT
-server = app.server 
+# THIS LINE IS CRUCIAL FOR PLOTLY/DASH CLOUD DEPLOYMENT
+server = app.server
 
 app.title = "Monte Carlo Portfolio Optimizer"
 
@@ -153,8 +144,8 @@ app.layout = html.Div([
         html.Div([
             html.Label("Select Sectors"),
             dcc.Checklist(
-                id="sector-selection", 
-                options=sector_options, 
+                id="sector-selection",
+                options=sector_options,
                 value=["Technology"],
                 style={"display": "flex", "flexDirection": "column"}
             ),
@@ -177,7 +168,7 @@ app.layout = html.Div([
                         style={"backgroundColor": "#3498db", "color": "white", "padding": "10px", "width": "100%", "border": "none", "cursor": "pointer"}),
 
             html.Div(id="status-output", style={"marginTop": "10px"})
-        ], style={"width": "25%", "display": "inline-block", "verticalAlign": "top", 
+        ], style={"width": "25%", "display": "inline-block", "verticalAlign": "top",
                   "padding": "20px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "backgroundColor": "#f9f9f9", "borderRadius": "5px"}),
 
         html.Div([
@@ -276,8 +267,8 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
             
             allocation_rows.append({
                 "Ticker": ticker,
-                "Weight_Raw": weight, # Use raw weight for sorting
-                "Weight": f"{weight:.2%}", 
+                "Weight_Raw": weight,
+                "Weight": f"{weight:.2%}",
                 "Allocation": f"${alloc_value:,.2f}",
                 "Price": f"${price:.2f}",
                 "Shares": shares
@@ -301,7 +292,7 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
         ]
     )
 
-    # 3. Efficient Frontier Plot 
+    # 3. Efficient Frontier Plot
     frontier_fig = px.scatter(
         df, x="Volatility", y="Return", color="Sharpe Ratio",
         title="Efficient Frontier", hover_data=["Sharpe Ratio"],
@@ -316,9 +307,9 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
     ))
     frontier_fig.update_layout(template="plotly_white")
 
-    # 4. Correlation Plot 
+    # 4. Correlation Plot
     corr_fig = px.imshow(
-        returns.corr(), 
+        returns.corr(),
         text_auto=".2f",
         aspect="auto",
         title="Stock Correlation Matrix",
@@ -340,13 +331,5 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
 # -----------------------------
 # Run app
 # -----------------------------
-import os 
-# ... (rest of your imports)
-
-# ... (all your code and callbacks)
-
-if __name__ == "__main__":
-    # Get port from environment variable, default to 8050 if running locally
-    port = int(os.environ.get("PORT", 8050))
-    # host='0.0.0.0' is essential for containerized environments
-    app.run_server(debug=False, host='0.0.0.0', port=port)
+# REMOVED the 'if __name__ == "__main__":' block.
+# The Plotly/Dash Cloud service will automatically run the 'server' object.
