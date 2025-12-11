@@ -339,5 +339,13 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
 # -----------------------------
 # Run app
 # -----------------------------
+import os 
+# ... (rest of your imports)
+
+# ... (all your code and callbacks)
+
 if __name__ == "__main__":
-    app.run_server(debug=True, host='0.0.0.0', port=8050)
+    # Get port from environment variable, default to 8050 if running locally
+    port = int(os.environ.get("PORT", 8050))
+    # host='0.0.0.0' is essential for containerized environments
+    app.run_server(debug=False, host='0.0.0.0', port=port)
