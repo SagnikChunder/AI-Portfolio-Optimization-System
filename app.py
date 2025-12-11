@@ -15,7 +15,7 @@ from dash.exceptions import PreventUpdate
 STOCK_UNIVERSE = {
     "Technology": ["AAPL", "MSFT", "NVDA", "ADBE", "INTC"],
     "Finance": ["JPM", "BAC", "C", "WFC", "GS"],
-    "Energy": ["XOM", "CVX", "BP", "TTE", "COP"],  # Changed TOT to TTE (TotalEnergies ticker change)
+    "Energy": ["XOM", "CVX", "BP", "TTE", "COP"], 
     "Consumer": ["AMZN", "WMT", "PG", "KO", "MCD"]
 }
 
@@ -31,12 +31,11 @@ def get_market_data(tickers, period="1y", interval="1d"):
         return pd.DataFrame()
 
     try:
-        # Download data
         df = yf.download(tickers, period=period, interval=interval, progress=False)
         
-        # Handle the MultiIndex columns returned by new yfinance versions
+        # Handle MultiIndex columns (common for multi-ticker download)
         if isinstance(df.columns, pd.MultiIndex):
-            # If 'Adj Close' exists in the top level, use it
+            # Prioritize Adj Close, fall back to Close
             if 'Adj Close' in df.columns.get_level_values(0):
                 df = df['Adj Close']
             elif 'Close' in df.columns.get_level_values(0):
@@ -52,16 +51,14 @@ def get_market_data(tickers, period="1y", interval="1d"):
         print(f"yfinance download error: {e}")
         return pd.DataFrame()
 
-    # If single ticker, df might be a Series, convert to DataFrame
+    # Ensure it's a DataFrame and columns are named after tickers
     if isinstance(df, pd.Series):
         df = df.to_frame()
-        # Rename column to the single ticker if necessary
         if len(tickers) == 1:
             df.columns = tickers
 
-    # Clean data
-    df = df.dropna(axis=1, how="all") # Drop tickers with no data
-    df = df.ffill().dropna()          # Forward fill and drop remaining NaNs
+    df = df.dropna(axis=1, how="all")
+    df = df.ffill().dropna()
 
     return df
 
@@ -74,7 +71,6 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
     if not tickers:
         return None, None, None, None, None
 
-    # Cap tickers to prevent timeout on free tiers
     if len(tickers) > 12:
         tickers = tickers[:12]
 
@@ -83,54 +79,45 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
     if data.empty or len(data.columns) < 2:
         return None, None, None, None, None
 
-    # Calculate Daily Returns
     returns = data.pct_change().dropna()
     if returns.empty:
         return None, None, None, None, None
 
-    # Annualize stats
+    # Use actual columns from data, as some tickers might have failed to download
+    used_tickers = list(data.columns)
     trading_days = 252
     mean_returns = returns.mean().values * trading_days
     cov_matrix = returns.cov().values * trading_days
-    num_assets = len(data.columns) # Use actual columns from data, not input tickers
+    num_assets = len(used_tickers) 
 
-    # Validate num_portfolios
     try:
         num_portfolios = int(num_portfolios)
     except:
         num_portfolios = 5000
     num_portfolios = max(100, min(num_portfolios, 20000))
 
-    # Generate Random Weights
     weights = np.random.random((num_portfolios, num_assets))
     weights /= np.sum(weights, axis=1)[:, np.newaxis]
 
-    # Portfolio Metrics
     port_returns = np.dot(weights, mean_returns)
     port_variance = np.sum(np.dot(weights, cov_matrix) * weights, axis=1)
-    port_std = np.sqrt(np.maximum(port_variance, 0)) # Ensure non-negative before sqrt
-
-    # Avoid divide by zero
+    port_std = np.sqrt(np.maximum(port_variance, 0)) 
     port_std = np.where(port_std == 0, 1e-9, port_std)
 
     risk_free = 0.04 
     sharpe_ratios = (port_returns - risk_free) / port_std
 
-    # Construct Results DataFrame
     results = {
         "Return": port_returns,
         "Volatility": port_std,
         "Sharpe Ratio": sharpe_ratios
     }
     
-    # Add weights to results
-    # data.columns ensures we map weights to the correct valid tickers
-    for i, ticker in enumerate(data.columns):
+    for i, ticker in enumerate(used_tickers):
         results[f"{ticker}_Weight"] = weights[:, i]
 
     df = pd.DataFrame(results)
 
-    # Filter by Risk Tolerance
     try:
         risk_tolerance = float(risk_tolerance)
     except:
@@ -142,17 +129,16 @@ def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2, see
         optimal_idx = valid_risk["Sharpe Ratio"].idxmax()
         optimal_portfolio = valid_risk.loc[optimal_idx]
     else:
-        # Fallback if no portfolio meets risk criteria
         optimal_idx = df["Sharpe Ratio"].idxmax()
         optimal_portfolio = df.loc[optimal_idx]
 
-    return df, optimal_portfolio, returns, data, list(data.columns)
+    return df, optimal_portfolio, returns, data, used_tickers
 
 # -----------------------------
 # Build Dash app layout
 # -----------------------------
 app = Dash(__name__)
-# EXPOSE SERVER FOR DEPLOYMENT (Required by Gunicorn/Render/Heroku)
+# EXPOSE SERVER FOR DEPLOYMENT
 server = app.server 
 
 app.title = "Monte Carlo Portfolio Optimizer"
@@ -232,7 +218,6 @@ app.layout = html.Div([
 def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolios, investment_amount):
     empty_fig = go.Figure()
     
-    # Don't run on initial load
     if not n_clicks:
         raise PreventUpdate
 
@@ -241,13 +226,11 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
         status_style = {"backgroundColor": "#e74c3c", "color": "white", "padding": "10px", "borderRadius": "3px"}
         return "", "", empty_fig, empty_fig, empty_fig, status_msg, status_style
 
-    # Build ticker list
     all_tickers = []
     for sector in selected_sectors:
         all_tickers.extend(STOCK_UNIVERSE.get(sector, []))
-    all_tickers = list(dict.fromkeys(all_tickers)) # remove duplicates
+    all_tickers = list(dict.fromkeys(all_tickers))
 
-    # Validate inputs
     try:
         num_portfolios = int(num_portfolios) if num_portfolios else 4000
         investment_amount = float(investment_amount) if investment_amount else 0.0
@@ -255,7 +238,6 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
     except ValueError:
         return "", "", empty_fig, empty_fig, empty_fig, "Invalid input numbers", {}
 
-    # Run Simulation
     try:
         df, optimal_portfolio, returns, data, used_tickers = monte_carlo_simulation(
             all_tickers, num_portfolios, risk_tolerance
@@ -271,7 +253,7 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
 
     # 1. Summary
     summary = html.Div([
-        html.H3("Results", style={"color": "#2c3e50", "marginTop": "0"}),
+        html.H3("Portfolio Results", style={"color": "#2c3e50", "marginTop": "0"}),
         html.Div([
             html.P([html.Strong("Expected Annual Return: "), f"{optimal_portfolio['Return']:.2%}"]),
             html.P([html.Strong("Portfolio Volatility: "), f"{optimal_portfolio['Volatility']:.2%}"]),
@@ -286,29 +268,24 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
 
     for ticker in used_tickers:
         weight = float(optimal_portfolio.get(f"{ticker}_Weight", 0.0))
-        if weight > 0.001:  # Show only > 0.1% allocation
+        if weight > 0.001:
             price = float(current_prices.get(ticker, 0))
             alloc_value = weight * investment_amount
             shares = int(alloc_value / price) if price > 0 else 0
             
             allocation_rows.append({
                 "Ticker": ticker,
-                "Weight": weight, # Keep raw for sorting
-                "Allocation": alloc_value,
-                "Price": price,
+                "Weight_Raw": weight, # Use raw weight for sorting
+                "Weight": f"{weight:.2%}", 
+                "Allocation": f"${alloc_value:,.2f}",
+                "Price": f"${price:.2f}",
                 "Shares": shares
             })
 
-    alloc_df = pd.DataFrame(allocation_rows).sort_values("Weight", ascending=False)
-    
-    # Format for display
-    display_data = alloc_df.copy()
-    display_data['Weight'] = display_data['Weight'].apply(lambda x: f"{x:.2%}")
-    display_data['Allocation'] = display_data['Allocation'].apply(lambda x: f"${x:,.2f}")
-    display_data['Price'] = display_data['Price'].apply(lambda x: f"${x:.2f}")
+    alloc_df = pd.DataFrame(allocation_rows).sort_values("Weight_Raw", ascending=False).drop(columns=['Weight_Raw'])
 
     allocation_table = dash_table.DataTable(
-        data=display_data.to_dict("records"),
+        data=alloc_df.to_dict("records"),
         columns=[
             {"name": "Ticker", "id": "Ticker"},
             {"name": "Weight", "id": "Weight"},
@@ -323,11 +300,11 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
         ]
     )
 
-    # 3. Efficient Frontier Plot
+    # 3. Efficient Frontier Plot 
     frontier_fig = px.scatter(
         df, x="Volatility", y="Return", color="Sharpe Ratio",
         title="Efficient Frontier", hover_data=["Sharpe Ratio"],
-        color_continuous_scale="Viridis"
+        color_continuous_scale="Viridis", labels={"Volatility": "Annual Volatility", "Return": "Annualized Return"}
     )
     frontier_fig.add_trace(go.Scatter(
         x=[optimal_portfolio["Volatility"]],
@@ -338,13 +315,12 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
     ))
     frontier_fig.update_layout(template="plotly_white")
 
-    # 4. Correlation Plot
-    corr_matrix = returns.corr()
+    # 4. Correlation Plot 
     corr_fig = px.imshow(
-        corr_matrix, 
+        returns.corr(), 
         text_auto=".2f",
         aspect="auto",
-        title="Correlation Matrix",
+        title="Stock Correlation Matrix",
         color_continuous_scale="RdBu_r",
         zmin=-1, zmax=1
     )
@@ -364,6 +340,4 @@ def optimize_portfolio(n_clicks, selected_sectors, risk_tolerance, num_portfolio
 # Run app
 # -----------------------------
 if __name__ == "__main__":
-    # Debug=False is better for Docker/Deployment to avoid reloader issues
-    # host='0.0.0.0' is required for containerized environments
-    app.run_server(debug=True, host='0.0.0.0', port=8050))
+    app.run_server(debug=True, host='0.0.0.0', port=8050)
