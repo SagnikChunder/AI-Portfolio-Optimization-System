@@ -1,454 +1,399 @@
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
 import dash
 from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
-import datetime
-import yfinance as yf
-import warnings
 
-warnings.filterwarnings('ignore')
+# -----------------------------------------------------------
+# Data and helper functions
+# -----------------------------------------------------------
 
-# Stock universe with sectors
 STOCK_UNIVERSE = {
-    'Technology': ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX'],
-    'Finance': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C'],
-    'Healthcare': ['JNJ', 'UNH', 'PFE', 'ABBV', 'MRK', 'TMO'],
-    'Energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG'],
-    'Consumer': ['PG', 'KO', 'PEP', 'WMT', 'HD', 'MCD'],
-    'Industrial': ['BA', 'CAT', 'GE', 'MMM', 'UPS']
+    "Technology": ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "NFLX"],
+    "Finance": ["JPM", "BAC", "WFC", "GS", "MS", "C"],
+    "Healthcare": ["JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "EOG"],
+    "Consumer": ["PG", "KO", "PEP", "WMT", "HD", "MCD"],
+    "Industrial": ["BA", "CAT", "GE", "MMM", "UPS"],
 }
 
 
-def get_market_data(tickers, period='1y'):
-    """Fetch market data with error handling"""
-    try:
-        for attempt in range(3):
-            try:
-                data = yf.download(tickers, period=period, progress=False, threads=True)
-                
-                if data.empty:
-                    continue
-                
-                if len(tickers) == 1:
-                    if 'Adj Close' in data.columns:
-                        return pd.DataFrame({tickers[0]: data['Adj Close']})
-                    else:
-                        return pd.DataFrame({tickers[0]: data['Close']})
-                
-                if 'Adj Close' in data.columns:
-                    return data['Adj Close']
-                else:
-                    return data['Close']
-                    
-            except Exception as e:
-                if attempt < 2:
-                    import time
-                    time.sleep(2)
-                continue
-                
-        return pd.DataFrame()
-        
-    except Exception as e:
+def get_market_data(tickers, period="1y"):
+    """Fetch market data (Adj Close or Close) for given tickers."""
+    if not tickers:
         return pd.DataFrame()
 
-
-def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
-    """Monte Carlo simulation for portfolio optimization"""
     try:
-        if len(tickers) > 10:
-            tickers = tickers[:10]
-        
-        data = get_market_data(tickers, period='1y')
-        
+        data = yf.download(tickers, period=period, progress=False, threads=True)
         if data.empty:
-            fallback_tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
-            data = get_market_data(fallback_tickers, period='1y')
-            if not data.empty:
-                tickers = fallback_tickers
-            else:
-                return None, None, None, None
-        
-        data = data.dropna()
-        if len(data) < 100:
-            return None, None, None, None
-        
-        returns = data.pct_change().dropna()
-        
-        if returns.empty:
-            return None, None, None, None
-        
-        mean_returns = returns.mean() * 252
-        cov_matrix = returns.cov() * 252
-        
-        if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
-            return None, None, None, None
-        
-        results = np.zeros((num_portfolios, 3 + len(tickers)))
-        
-        for i in range(num_portfolios):
-            weights = np.random.random(len(tickers))
-            weights /= np.sum(weights)
-            
-            portfolio_return = np.sum(mean_returns * weights)
-            portfolio_std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-            
-            if portfolio_std == 0:
-                sharpe_ratio = 0
-            else:
-                sharpe_ratio = (portfolio_return - 0.04) / portfolio_std
-            
-            results[i, 0] = portfolio_return
-            results[i, 1] = portfolio_std
-            results[i, 2] = sharpe_ratio
-            results[i, 3:] = weights
-        
-        columns = ['Return', 'Volatility', 'Sharpe Ratio'] + [f'{ticker}_Weight' for ticker in tickers]
-        df = pd.DataFrame(results, columns=columns)
-        
-        df = df[(df['Volatility'] > 0) & (df['Volatility'] < 1) & (np.isfinite(df['Sharpe Ratio']))]
-        
-        if df.empty:
-            return None, None, None, None
-        
-        filtered_df = df[df['Volatility'] <= risk_tolerance]
-        
-        if not filtered_df.empty:
-            optimal_idx = filtered_df['Sharpe Ratio'].idxmax()
-            optimal_portfolio = filtered_df.loc[optimal_idx]
+            return pd.DataFrame()
+
+        # Single ticker: yf returns a Series-like DataFrame
+        if len(tickers) == 1:
+            col = "Adj Close" if "Adj Close" in data.columns else "Close"
+            return pd.DataFrame({tickers[0]: data[col]})
+
+        # Multiple tickers: yf returns multi-index columns
+        if "Adj Close" in data.columns:
+            return data["Adj Close"]
+        elif "Close" in data.columns:
+            return data["Close"]
         else:
-            optimal_idx = df['Sharpe Ratio'].idxmax()
-            optimal_portfolio = df.loc[optimal_idx]
-        
-        return df, optimal_portfolio, returns, data
-        
-    except Exception as e:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def monte_carlo_simulation(tickers, num_portfolios=5000, risk_tolerance=0.2):
+    """Simple Monte Carlo portfolio optimization."""
+    if len(tickers) < 2:
         return None, None, None, None
 
+    # Limit to keep things light
+    tickers = list(tickers)[:8]
 
-def create_efficient_frontier(df, optimal_portfolio, tickers):
-    """Create efficient frontier visualization"""
+    data = get_market_data(tickers, period="1y")
+    if data.empty:
+        return None, None, None, None
+
+    data = data.dropna()
+    if len(data) < 100:
+        return None, None, None, None
+
+    returns = data.pct_change().dropna()
+    if returns.empty:
+        return None, None, None, None
+
+    mean_returns = returns.mean() * 252
+    cov_matrix = returns.cov() * 252
+
+    if np.any(~np.isfinite(cov_matrix.values)):
+        return None, None, None, None
+
+    results = np.zeros((num_portfolios, 3 + len(tickers)))
+
+    for i in range(num_portfolios):
+        weights = np.random.random(len(tickers))
+        weights /= np.sum(weights)
+
+        port_ret = np.sum(mean_returns * weights)
+        port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        sharpe = 0.0 if port_vol == 0 else (port_ret - 0.04) / port_vol
+
+        results[i, 0] = port_ret
+        results[i, 1] = port_vol
+        results[i, 2] = sharpe
+        results[i, 3:] = weights
+
+    cols = ["Return", "Volatility", "Sharpe"] + [f"{t}_Weight" for t in tickers]
+    df = pd.DataFrame(results, columns=cols)
+
+    df = df[(df["Volatility"] > 0) & (df["Volatility"] < 1) & np.isfinite(df["Sharpe"])]
+    if df.empty:
+        return None, None, None, None
+
+    filtered = df[df["Volatility"] <= risk_tolerance]
+    if not filtered.empty:
+        opt = filtered.loc[filtered["Sharpe"].idxmax()]
+    else:
+        opt = df.loc[df["Sharpe"].idxmax()]
+
+    return df, opt, returns, data
+
+
+def make_frontier_figure(df, optimal):
     fig = go.Figure()
-    
     if df is None or df.empty:
+        fig.update_layout(title="Efficient Frontier (no data)")
         return fig
-    
-    valid_data = df[(df['Volatility'] > 0) & (df['Return'].notna()) & (df['Sharpe Ratio'].notna())]
-    
-    if len(valid_data) > 0:
-        fig.add_trace(go.Scatter(
-            x=valid_data['Volatility'],
-            y=valid_data['Return'],
-            mode='markers',
+
+    fig.add_trace(
+        go.Scatter(
+            x=df["Volatility"],
+            y=df["Return"],
+            mode="markers",
             marker=dict(
-                color=valid_data['Sharpe Ratio'],
-                colorscale='Viridis',
-                size=5,
-                colorbar=dict(title="Sharpe Ratio")
+                size=4,
+                color=df["Sharpe"],
+                colorscale="Viridis",
+                colorbar=dict(title="Sharpe"),
             ),
-            name='Portfolios'
-        ))
-        
-        if optimal_portfolio is not None:
-            fig.add_trace(go.Scatter(
-                x=[optimal_portfolio['Volatility']],
-                y=[optimal_portfolio['Return']],
-                mode='markers',
-                marker=dict(color='red', size=20, symbol='star'),
-                name='Optimal Portfolio'
-            ))
-    
-    fig.update_layout(
-        title='Efficient Frontier - Risk vs Return',
-        xaxis_title='Volatility (Risk)',
-        yaxis_title='Expected Return',
-        hovermode='closest',
-        height=500
-    )
-    
-    return fig
-
-
-def create_allocation_pie(optimal_portfolio, tickers):
-    """Create portfolio allocation pie chart"""
-    fig = go.Figure()
-    
-    if optimal_portfolio is None:
-        return fig
-    
-    weights = []
-    valid_tickers = []
-    
-    for ticker in tickers:
-        weight_col = f'{ticker}_Weight'
-        if weight_col in optimal_portfolio and optimal_portfolio[weight_col] > 0.02:
-            weights.append(optimal_portfolio[weight_col])
-            valid_tickers.append(ticker)
-    
-    if weights:
-        fig.add_trace(go.Pie(
-            labels=valid_tickers,
-            values=weights,
-            hole=0.3
-        ))
-        
-        fig.update_layout(
-            title='Optimal Portfolio Allocation',
-            height=500
+            name="Portfolios",
         )
-    
-    return fig
-
-
-def create_correlation_heatmap(returns, tickers):
-    """Create correlation heatmap"""
-    fig = go.Figure()
-    
-    if returns is None or returns.empty:
-        return fig
-    
-    correlation_matrix = returns.corr()
-    
-    fig.add_trace(go.Heatmap(
-        z=correlation_matrix.values,
-        x=tickers,
-        y=tickers,
-        colorscale='RdBu',
-        zmid=0,
-        text=correlation_matrix.values,
-        texttemplate='%{text:.2f}',
-        textfont={"size": 10}
-    ))
-    
-    fig.update_layout(
-        title='Stock Correlation Matrix',
-        height=600
     )
-    
+
+    if optimal is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[optimal["Volatility"]],
+                y=[optimal["Return"]],
+                mode="markers",
+                marker=dict(size=14, color="red", symbol="star"),
+                name="Optimal",
+            )
+        )
+
+    fig.update_layout(
+        title="Efficient Frontier",
+        xaxis_title="Volatility (Risk)",
+        yaxis_title="Expected Return",
+        height=450,
+    )
     return fig
 
 
-def generate_investment_report(optimal_portfolio, tickers, investment_amount):
-    """Generate investment allocation table"""
-    try:
-        weights = [optimal_portfolio[f'{ticker}_Weight'] for ticker in tickers]
-        allocations = [weight * investment_amount for weight in weights]
-        
-        current_prices = {}
-        shares = {}
-        
-        for ticker in tickers:
-            try:
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period='5d')
-                if not hist.empty:
-                    current_prices[ticker] = hist['Close'].iloc[-1]
-                    shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
-                else:
-                    current_prices[ticker] = 100.0
-                    shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
-            except:
-                current_prices[ticker] = 100.0
-                shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
-        
-        report_data = []
-        for i, ticker in enumerate(tickers):
-            report_data.append({
-                'Ticker': ticker,
-                'Weight': f"{weights[i]*100:.2f}%",
-                'Allocation': f"${allocations[i]:,.2f}",
-                'Current Price': f"${current_prices[ticker]:.2f}",
-                'Shares': shares[ticker]
-            })
-        
-        return pd.DataFrame(report_data)
-        
-    except Exception as e:
+def make_allocation_figure(optimal, tickers):
+    fig = go.Figure()
+    if optimal is None:
+        fig.update_layout(title="Allocation (no data)")
+        return fig
+
+    labels = []
+    values = []
+    for t in tickers:
+        col = f"{t}_Weight"
+        if col in optimal and optimal[col] > 0.01:
+            labels.append(t)
+            values.append(optimal[col])
+
+    if not values:
+        fig.update_layout(title="Allocation (no significant weights)")
+        return fig
+
+    fig.add_trace(go.Pie(labels=labels, values=values, hole=0.3))
+    fig.update_layout(title="Optimal Portfolio Allocation", height=450)
+    return fig
+
+
+def make_correlation_figure(returns, tickers):
+    fig = go.Figure()
+    if returns is None or returns.empty:
+        fig.update_layout(title="Correlation (no data)")
+        return fig
+
+    corr = returns.corr()
+    tickers_in_data = [t for t in tickers if t in corr.columns]
+
+    fig.add_trace(
+        go.Heatmap(
+            z=corr.loc[tickers_in_data, tickers_in_data].values,
+            x=tickers_in_data,
+            y=tickers_in_data,
+            colorscale="RdBu",
+            zmid=0,
+        )
+    )
+    fig.update_layout(title="Stock Correlation Matrix", height=500)
+    return fig
+
+
+def make_allocation_table(optimal, tickers, investment):
+    if optimal is None or investment is None or investment <= 0:
         return pd.DataFrame()
 
+    rows = []
+    for t in tickers:
+        col = f"{t}_Weight"
+        w = float(optimal[col]) if col in optimal else 0.0
+        alloc = w * investment
 
-# Initialize the Dash app
+        price = 100.0
+        shares = 0
+        try:
+            hist = yf.Ticker(t).history(period="5d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+        except Exception:
+            price = 100.0
+        if price > 0:
+            shares = int(alloc // price)
+
+        rows.append(
+            {
+                "Ticker": t,
+                "Weight (%)": f"{w * 100:.2f}",
+                "Allocation ($)": f"{alloc:,.2f}",
+                "Price ($)": f"{price:.2f}",
+                "Shares": shares,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+# -----------------------------------------------------------
+# Dash app
+# -----------------------------------------------------------
+
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
-# App layout
-app.layout = dbc.Container([
-    html.H1("AI-Powered Portfolio Management Assistant", className="text-center my-4"),
-    html.P("Professional portfolio optimization using Modern Portfolio Theory and Monte Carlo simulation",
-           className="text-center text-muted mb-4"),
-    
-    dbc.Row([
-        dbc.Col([
-            html.H4("Configuration"),
-            html.Hr(),
-            
-            html.Label("Select Sectors:"),
-            dcc.Checklist(
-                id='sector-selection',
-                options=[{'label': sector, 'value': sector} for sector in STOCK_UNIVERSE.keys()],
-                value=['Technology', 'Finance'],
-                labelStyle={'display': 'block', 'margin': '5px'}
-            ),
-            
-            html.Br(),
-            html.Label("Risk Tolerance (Max Volatility):"),
-            dcc.Slider(
-                id='risk-tolerance',
-                min=0.05,
-                max=0.50,
-                step=0.01,
-                value=0.20,
-                marks={0.05: '0.05', 0.20: '0.20', 0.35: '0.35', 0.50: '0.50'},
-                tooltip={"placement": "bottom", "always_visible": True}
-            ),
-            
-            html.Br(),
-            html.Label("Monte Carlo Simulations:"),
-            dcc.Slider(
-                id='num-portfolios',
-                min=1000,
-                max=50000,
-                step=1000,
-                value=10000,
-                marks={1000: '1K', 10000: '10K', 30000: '30K', 50000: '50K'},
-                tooltip={"placement": "bottom", "always_visible": True}
-            ),
-            
-            html.Br(),
-            html.Label("Investment Amount ($):"),
-            dcc.Input(
-                id='investment-amount',
-                type='number',
-                value=10000,
-                style={'width': '100%'}
-            ),
-            
-            html.Br(),
-            html.Br(),
-            dbc.Button("Optimize Portfolio", id="optimize-btn", color="primary", className="w-100"),
-            
-            html.Br(),
-            html.Br(),
-            html.Div(id='status-message')
-            
-        ], width=3),
-        
-        dbc.Col([
-            dbc.Tabs([
-                dbc.Tab(label="Summary", tab_id="summary-tab"),
-                dbc.Tab(label="Efficient Frontier", tab_id="frontier-tab"),
-                dbc.Tab(label="Allocation", tab_id="allocation-tab"),
-                dbc.Tab(label="Correlation", tab_id="correlation-tab"),
-            ], id="tabs", active_tab="summary-tab"),
-            
-            html.Div(id='tab-content', className="mt-3")
-            
-        ], width=9)
-    ]),
-    
-    html.Hr(),
-    html.P("Disclaimer: This tool is for educational purposes only. Past performance does not guarantee future results. "
-           "Always consult with a financial advisor before making investment decisions.",
-           className="text-center text-muted small")
-    
-], fluid=True)
+app.layout = dbc.Container(
+    [
+        html.Br(),
+        html.H2("AI Portfolio Management (Simplified)", className="text-center"),
+        html.Hr(),
+
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.H4("Configuration"),
+                        html.Label("Sectors"),
+                        dcc.Checklist(
+                            id="sector-select",
+                            options=[
+                                {"label": s, "value": s} for s in STOCK_UNIVERSE.keys()
+                            ],
+                            value=["Technology", "Finance"],
+                            labelStyle={"display": "block"},
+                        ),
+                        html.Br(),
+                        html.Label("Risk tolerance (max volatility)"),
+                        dcc.Slider(
+                            id="risk-tolerance",
+                            min=0.05,
+                            max=0.5,
+                            step=0.01,
+                            value=0.2,
+                            tooltip={"placement": "bottom", "always_visible": True},
+                        ),
+                        html.Br(),
+                        html.Label("Number of simulations"),
+                        dcc.Slider(
+                            id="num-portfolios",
+                            min=1000,
+                            max=20000,
+                            step=1000,
+                            value=5000,
+                            tooltip={"placement": "bottom", "always_visible": True},
+                        ),
+                        html.Br(),
+                        html.Label("Investment amount ($)"),
+                        dcc.Input(
+                            id="investment-amount",
+                            type="number",
+                            value=10000,
+                            min=1000,
+                            step=500,
+                            style={"width": "100%"},
+                        ),
+                        html.Br(),
+                        html.Br(),
+                        dbc.Button(
+                            "Run optimization",
+                            id="run-btn",
+                            color="primary",
+                            className="w-100",
+                        ),
+                        html.Br(),
+                        html.Br(),
+                        html.Div(id="status-text", className="text-danger"),
+                    ],
+                    width=3,
+                ),
+
+                dbc.Col(
+                    [
+                        html.H4("Summary"),
+                        html.Div(id="summary-div"),
+                        html.Br(),
+
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    dcc.Graph(id="frontier-graph"),
+                                    width=6,
+                                ),
+                                dbc.Col(
+                                    dcc.Graph(id="allocation-graph"),
+                                    width=6,
+                                ),
+                            ]
+                        ),
+
+                        html.Br(),
+                        dcc.Graph(id="correlation-graph"),
+                    ],
+                    width=9,
+                ),
+            ]
+        ),
+
+        html.Hr(),
+        html.P(
+            "Disclaimer: Educational use only. This is not financial advice.",
+            className="text-center text-muted",
+        ),
+    ],
+    fluid=True,
+)
 
 
 @app.callback(
-    [Output('tab-content', 'children'),
-     Output('status-message', 'children')],
-    [Input('optimize-btn', 'n_clicks'),
-     Input('tabs', 'active_tab')],
-    [State('sector-selection', 'value'),
-     State('risk-tolerance', 'value'),
-     State('num-portfolios', 'value'),
-     State('investment-amount', 'value')]
+    [
+        Output("summary-div", "children"),
+        Output("frontier-graph", "figure"),
+        Output("allocation-graph", "figure"),
+        Output("correlation-graph", "figure"),
+        Output("status-text", "children"),
+    ],
+    Input("run-btn", "n_clicks"),
+    State("sector-select", "value"),
+    State("risk-tolerance", "value"),
+    State("num-portfolios", "value"),
+    State("investment-amount", "value"),
 )
-def update_content(n_clicks, active_tab, selected_sectors, risk_tolerance, num_portfolios, investment_amount):
-    """Main callback for portfolio optimization"""
-    
-    if n_clicks is None:
-        return html.Div("Configure settings and click 'Optimize Portfolio' to begin"), ""
-    
-    if not selected_sectors:
-        return html.Div("Please select at least one sector"), html.Div("Error: No sectors selected", className="text-danger")
-    
-    if investment_amount is None or investment_amount <= 0:
-        return html.Div("Please enter a valid investment amount"), html.Div("Error: Invalid investment amount", className="text-danger")
-    
-    # Get selected tickers
+def run_optimization(n_clicks, sectors, risk_tol, num_ports, investment):
+    if not n_clicks:
+        return "Click 'Run optimization' to start.", go.Figure(), go.Figure(), go.Figure(), ""
+
+    if not sectors:
+        return "Please select at least one sector.", go.Figure(), go.Figure(), go.Figure(), "No sectors selected."
+
+    if investment is None or investment <= 0:
+        return "Enter a positive investment amount.", go.Figure(), go.Figure(), go.Figure(), "Invalid investment amount."
+
+    # Build ticker list
     tickers = []
-    for sector in selected_sectors:
-        if sector in STOCK_UNIVERSE:
-            tickers.extend(STOCK_UNIVERSE[sector])
-    
-    tickers = list(set(tickers))
-    
+    for s in sectors:
+        tickers.extend(STOCK_UNIVERSE.get(s, []))
+    tickers = sorted(set(tickers))
+
     if len(tickers) < 2:
-        return html.Div("Please select sectors with at least 2 different stocks"), html.Div("Error: Insufficient stocks", className="text-danger")
-    
-    if len(tickers) > 8:
-        tickers = tickers[:8]
-    
-    # Run Monte Carlo simulation
-    df, optimal_portfolio, returns, data = monte_carlo_simulation(tickers, int(num_portfolios), risk_tolerance)
-    
-    if df is None or optimal_portfolio is None:
-        return html.Div("Unable to fetch market data or optimize portfolio. Please try again."), html.Div("Error: Optimization failed", className="text-danger")
-    
-    # Generate content based on active tab
-    if active_tab == "summary-tab":
-        report_df = generate_investment_report(optimal_portfolio, tickers, investment_amount)
-        
-        summary_stats = dbc.Card([
-            dbc.CardBody([
-                html.H4("Portfolio Summary"),
-                html.Hr(),
-                html.P([
-                    html.Strong("Expected Annual Return: "),
-                    f"{optimal_portfolio['Return']:.2%}"
-                ]),
-                html.P([
-                    html.Strong("Portfolio Volatility: "),
-                    f"{optimal_portfolio['Volatility']:.2%}"
-                ]),
-                html.P([
-                    html.Strong("Sharpe Ratio: "),
-                    f"{optimal_portfolio['Sharpe Ratio']:.4f}"
-                ]),
-                html.P([
-                    html.Strong("Total Investment: "),
-                    f"${investment_amount:,.2f}"
-                ]),
-                html.Hr(),
-                html.H5("Investment Allocation"),
-                dbc.Table.from_dataframe(report_df, striped=True, bordered=True, hover=True)
-            ])
-        ])
-        
-        status = html.Div(f"Analysis complete! Optimized portfolio using {len(tickers)} stocks from {len(selected_sectors)} sectors.", 
-                         className="text-success")
-        
-        return summary_stats, status
-    
-    elif active_tab == "frontier-tab":
-        fig = create_efficient_frontier(df, optimal_portfolio, tickers)
-        status = html.Div(f"Efficient frontier generated with {int(num_portfolios)} simulations", className="text-success")
-        return dcc.Graph(figure=fig), status
-    
-    elif active_tab == "allocation-tab":
-        fig = create_allocation_pie(optimal_portfolio, tickers)
-        status = html.Div("Portfolio allocation visualization ready", className="text-success")
-        return dcc.Graph(figure=fig), status
-    
-    elif active_tab == "correlation-tab":
-        fig = create_correlation_heatmap(returns, tickers)
-        status = html.Div("Correlation analysis complete", className="text-success")
-        return dcc.Graph(figure=fig), status
-    
-    return html.Div("Select a tab to view results"), ""
+        return "Need at least two stocks.", go.Figure(), go.Figure(), go.Figure(), "Insufficient stocks."
+
+    df, optimal, returns, data = monte_carlo_simulation(
+        tickers, int(num_ports), float(risk_tol)
+    )
+
+    if df is None or optimal is None:
+        return "Optimization failed. Try different settings.", go.Figure(), go.Figure(), go.Figure(), "Optimization failed."
+
+    frontier_fig = make_frontier_figure(df, optimal)
+    alloc_fig = make_allocation_figure(optimal, tickers)
+    corr_fig = make_correlation_figure(returns, tickers)
+
+    table_df = make_allocation_table(optimal, tickers, float(investment))
+
+    summary_children = [
+        html.P(f"Expected annual return: {optimal['Return']:.2%}"),
+        html.P(f"Portfolio volatility: {optimal['Volatility']:.2%}"),
+        html.P(f"Sharpe ratio: {optimal['Sharpe']:.4f}"),
+        html.P(f"Total investment: ${investment:,.2f}"),
+        html.Br(),
+        dbc.Table.from_dataframe(table_df, striped=True, bordered=True, hover=True),
+    ]
+
+    status = f"Optimization complete using {len(tickers)} stocks from {len(sectors)} sectors."
+
+    return summary_children, frontier_fig, alloc_fig, corr_fig, status
 
 
-if __name__ == '__main__':
-    app.run_server(debug=True, host='0.0.0.0', port=8050)
+if __name__ == "__main__":
+    app.run_server(debug=True, host="0.0.0.0", port=8050)
