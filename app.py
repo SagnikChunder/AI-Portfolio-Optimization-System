@@ -9,8 +9,9 @@ import plotly.graph_objects as go
 import warnings
 from datetime import datetime
 
-# Suppress pandas/yfinance warnings
-warnings.filterfilterwarnings('ignore')
+# --- CRITICAL FIX APPLIED HERE ---
+# Corrected the typo 'filterfilterwarnings' to 'filterwarnings'
+warnings.filterwarnings('ignore') 
 
 # --- 1. CONFIGURATION ---
 STOCK_UNIVERSE = {
@@ -23,29 +24,37 @@ STOCK_UNIVERSE = {
 }
 DEFAULT_SECTORS = ['Technology', 'Finance']
 RISK_FREE_RATE = 0.04
-PERIOD = '1y'  # Reduced period for faster execution
+PERIOD = '1y' 
 
-# --- 2. BACKEND FUNCTIONS (Simplified) ---
+# --- 2. BACKEND FUNCTIONS ---
 
 def get_market_data(tickers, period=PERIOD):
     """Fetch market data using yfinance."""
-    print(f"Fetching data for {len(tickers)} tickers for {period}")
     try:
-        data = yf.download(tickers, period=period, progress=False)
+        data = yf.download(tickers, period=period, progress=False, threads=True)
         if data.empty:
             return pd.DataFrame()
         
-        # Ensure we get 'Adj Close' column for multiple or single tickers
-        if 'Adj Close' in data.columns and len(tickers) > 1:
-            return data['Adj Close'].dropna()
-        elif 'Adj Close' in data.columns and len(tickers) == 1:
-            return pd.DataFrame({tickers[0]: data['Adj Close']}).dropna()
-        elif 'Close' in data.columns and len(tickers) == 1:
-            return pd.DataFrame({tickers[0]: data['Close']}).dropna()
-        elif 'Close' in data.columns and len(tickers) > 1:
-            return data['Close'].dropna()
+        # Determine the appropriate closing price column
+        if 'Adj Close' in data.columns:
+            close_data = data['Adj Close']
+        elif 'Close' in data.columns:
+            close_data = data['Close']
         else:
-            return pd.DataFrame()
+            return pd.DataFrame() # No recognizable price column
+
+        # Handle single ticker case
+        if len(tickers) == 1:
+            if isinstance(close_data, pd.Series):
+                 # Convert Series to DataFrame with ticker name
+                return pd.DataFrame({tickers[0]: close_data}).dropna()
+            else:
+                # Close data is likely a DataFrame already, select the column
+                return close_data.iloc[:, 0].to_frame(name=tickers[0]).dropna()
+        
+        # Handle multiple tickers
+        return close_data.dropna()
+        
     except Exception as e:
         print(f"Error fetching data: {e}")
         return pd.DataFrame()
@@ -53,13 +62,12 @@ def get_market_data(tickers, period=PERIOD):
 def monte_carlo_simulation(tickers, num_portfolios, risk_tolerance):
     """
     Performs Monte Carlo simulation for portfolio optimization.
-    Returns: df (results), optimal_portfolio (Series), returns (DataFrame), tickers (list)
     """
     
+    # 1. Input Validation and Limiting
     if len(tickers) < 2:
         return None, None, None, []
-
-    # Limit to a maximum of 10 tickers for stability
+        
     if len(tickers) > 10:
         tickers = tickers[:10]
         
@@ -69,33 +77,43 @@ def monte_carlo_simulation(tickers, num_portfolios, risk_tolerance):
         print("Data is empty or insufficient for analysis.")
         return None, None, None, []
         
+    # Ensure only tickers that are actually in the data are used
+    tickers = data.columns.tolist() 
+
+    # 2. Financial Calculations
     returns = data.pct_change().dropna()
     mean_returns = returns.mean() * 252
     cov_matrix = returns.cov() * 252
     
     results = np.zeros((num_portfolios, 3 + len(tickers)))
     
+    # 3. Monte Carlo Simulation Loop
     for i in range(num_portfolios):
-        # Generate random weights
         weights = np.random.random(len(tickers))
         weights /= np.sum(weights)
         
-        # Calculate portfolio metrics
         portfolio_return = np.sum(mean_returns * weights)
-        portfolio_std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
         
-        # Sharpe Ratio (using Risk_Free_Rate)
-        sharpe_ratio = (portfolio_return - RISK_FREE_RATE) / portfolio_std if portfolio_std != 0 else 0
+        # Check for non-finite values in covariance matrix before np.dot
+        if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
+             portfolio_std = 1.0 # Assign a high placeholder risk to discard this run later
+        else:
+             portfolio_std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+
+        # Sharpe Ratio
+        sharpe_ratio = (portfolio_return - RISK_FREE_RATE) / portfolio_std if portfolio_std > 0 else 0
         
         results[i, 0] = portfolio_return
         results[i, 1] = portfolio_std
         results[i, 2] = sharpe_ratio
         results[i, 3:] = weights
     
-    # Create DataFrame
+    # 4. Results Processing
     columns = ['Return', 'Volatility', 'Sharpe Ratio'] + [f'{ticker}_Weight' for ticker in tickers]
     df = pd.DataFrame(results, columns=columns)
-    df = df[(df['Volatility'] > 0) & (np.isfinite(df['Sharpe Ratio']))]
+    
+    # Filter out invalid or zero-volatility portfolios
+    df = df[(df['Volatility'] > 0.001) & (df['Volatility'] < 1) & (np.isfinite(df['Sharpe Ratio']))]
     
     if df.empty:
         return None, None, None, []
@@ -160,7 +178,7 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
         weight_col = f'{ticker}_Weight'
         if weight_col in optimal_portfolio:
             weight = optimal_portfolio[weight_col]
-            if weight > 0.02:  # Show only weights > 2%
+            if weight > 0.02:  # Show only weights > 2% for clarity
                 weights.append(weight)
                 labels.append(ticker)
             else:
@@ -177,7 +195,8 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
         labels=labels, 
         values=weights, 
         hole=.3, 
-        marker={'colors': px.colors.sequential.Sunset_r}
+        marker={'colors': px.colors.sequential.Sunset_r},
+        sort=True
     )])
     
     fig.update_layout(
@@ -195,6 +214,12 @@ def create_correlation_heatmap(returns, tickers):
     
     correlation_matrix = returns.corr()
     
+    # Filter out tickers that might have been dropped due to missing data (NaN columns)
+    correlation_matrix = correlation_matrix.dropna(axis=0, how='all').dropna(axis=1, how='all')
+    
+    if correlation_matrix.empty:
+         return go.Figure().update_layout(title="Stock Correlation (No Valid Data)", height=400)
+         
     fig = go.Figure(data=go.Heatmap(
         z=correlation_matrix.values,
         x=correlation_matrix.columns,
@@ -203,13 +228,14 @@ def create_correlation_heatmap(returns, tickers):
         zmin=-1,
         zmax=1,
         text=correlation_matrix.apply(lambda x: [f'{val:.2f}' for val in x], axis=1).values,
+        texttemplate="%{text}",
         hoverongaps=False
     ))
     
     fig.update_layout(
         title='Stock Correlation Matrix',
-        xaxis_nticks=len(tickers),
-        yaxis_nticks=len(tickers),
+        xaxis_nticks=len(correlation_matrix.columns),
+        yaxis_nticks=len(correlation_matrix.columns),
         height=500,
         margin={"t":40, "l":20, "b":20, "r":20}
     )
@@ -217,7 +243,9 @@ def create_correlation_heatmap(returns, tickers):
 
 # --- 3. DASH APPLICATION LAYOUT ---
 
+# Initialize the Dash app. The 'server' variable is required for Gunicorn/production deployment.
 app = dash.Dash(__name__, external_stylesheets=['https://codepen.io/chriddyp/pen/bWLwgP.css'])
+server = app.server # Expose the Flask instance
 
 # Style for better look and feel
 main_style = {
@@ -228,13 +256,13 @@ main_style = {
 }
 
 app.layout = html.Div(style=main_style, children=[
-    html.H1("AI Portfolio Management Assistant (Dash)", style={'textAlign': 'center'}),
-    html.Div("Professional-grade portfolio optimization using Monte Carlo simulation and Modern Portfolio Theory.", style={'textAlign': 'center', 'marginBottom': '30px'}),
+    html.H2("AI Portfolio Management Assistant (Dash)", style={'textAlign': 'center', 'color': '#1f77b4'}),
+    html.Div("Professional-grade portfolio optimization using Monte Carlo simulation.", style={'textAlign': 'center', 'marginBottom': '30px'}),
 
     # --- INPUT CONTROLS ---
-    html.Div(className='row', children=[
+    html.Div(className='row', style={'border': '1px solid #ccc', 'padding': '15px', 'borderRadius': '5px'}, children=[
         html.Div(className='six columns', children=[
-            html.Label("Select Sectors (Stocks will be limited to 8 max):"),
+            html.Label("1. Select Sectors (Stocks limited to 10 max per run):"),
             dcc.Checklist(
                 id='sector-selection',
                 options=[{'label': sector, 'value': sector} for sector in STOCK_UNIVERSE.keys()],
@@ -259,21 +287,21 @@ app.layout = html.Div(style=main_style, children=[
             dcc.Slider(
                 id='num-portfolios-slider',
                 min=1000,
-                max=20000, # Max reduced for stability
+                max=20000, 
                 step=1000,
                 value=10000,
                 marks={i: f'{i/1000}k' for i in range(1000, 20001, 5000)}
             ),
         ]),
-    ], style={'marginBottom': '20px'}),
+    ], style={'marginBottom': '30px'}),
     
-    html.Button('Optimize Portfolio', id='optimize-button', n_clicks=0, className='button-primary', style={'width': '100%', 'marginBottom': '30px'}),
+    html.Button('🚀 Optimize Portfolio', id='optimize-button', n_clicks=0, className='button-primary', style={'width': '100%', 'marginBottom': '30px', 'backgroundColor': '#28a745', 'borderColor': '#28a745', 'color': 'white'}),
 
     dcc.Loading(
         id="loading-1",
-        type="default",
+        type="circle",
         children=[
-            html.Div(id='status-message', style={'textAlign': 'center', 'fontWeight': 'bold', 'marginBottom': '20px'}),
+            html.Div(id='status-message', style={'textAlign': 'center', 'fontWeight': 'bold', 'marginBottom': '20px', 'fontSize': '1.1em'}),
             
             # --- OUTPUT GRAPHS ---
             html.Div(className='row', children=[
@@ -290,14 +318,18 @@ app.layout = html.Div(style=main_style, children=[
                     dcc.Graph(id='correlation-heatmap-graph')
                 ]),
                 html.Div(className='six columns', children=[
-                    html.H4("Portfolio Summary", style={'textAlign': 'center'}),
+                    html.H4("Portfolio Summary", style={'textAlign': 'center', 'marginTop': '20px', 'color': '#1f77b4'}),
                     dcc.Markdown(id='summary-markdown'),
-                    html.H4("Investment Allocation", style={'textAlign': 'center', 'marginTop': '20px'}),
-                    html.Div(id='allocation-table-div')
+                    html.H4("Optimal Weight Allocation", style={'textAlign': 'center', 'marginTop': '20px', 'color': '#1f77b4'}),
+                    html.Div(id='allocation-table-div', style={'padding': '10px'})
                 ]),
             ])
         ]
-    )
+    ),
+    html.Div([
+        html.Hr(),
+        html.P("Disclaimer: This tool is for educational purposes only. Past performance does not guarantee future results.", style={'textAlign': 'center', 'fontSize': '0.8em', 'color': '#6c757d'})
+    ])
 ])
 
 # --- 4. DASH CALLBACKS ---
@@ -310,8 +342,8 @@ app.layout = html.Div(style=main_style, children=[
      Input('num-portfolios-slider', 'value')]
 )
 def update_slider_labels(risk_tolerance, num_portfolios):
-    risk_label = f"Risk Tolerance (Max Volatility: {risk_tolerance:.0%})"
-    num_label = f"Monte Carlo Simulations: {num_portfolios:,}"
+    risk_label = f"2. Risk Tolerance (Max Volatility: {risk_tolerance:.0%})"
+    num_label = f"3. Monte Carlo Simulations: {num_portfolios:,}"
     return risk_label, num_label
 
 # Main Optimization Callback
@@ -328,16 +360,16 @@ def update_slider_labels(risk_tolerance, num_portfolios):
      dash.dependencies.State('num-portfolios-slider', 'value')]
 )
 def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios):
-    # Initial status message and empty plots
-    initial_status = "Click 'Optimize Portfolio' to start the analysis."
-    empty_fig = go.Figure().update_layout(title="Awaiting Data", height=400)
-    empty_df = pd.DataFrame()
     
-    if n_clicks == 0:
-        return initial_status, empty_fig, empty_fig, empty_fig, "", dash_table.DataTable(id='empty-table', columns=[{'name': i, 'id': i} for i in ["Ticker", "Weight (%)"]], data=empty_df.to_dict('records'))
+    # Placeholder outputs for failure/initial state
+    empty_fig = go.Figure().update_layout(title="Awaiting Data / Error", height=400)
+    empty_table = dash_table.DataTable(columns=[{"name": "Ticker", "id": "Ticker"}, {"name": "Weight (%)", "id": "Weight (%)"}], data=[])
+    
+    if n_clicks is None or n_clicks == 0:
+        return "Click 'Optimize Portfolio' to start the analysis.", empty_fig, empty_fig, empty_fig, "", empty_table
 
     if not selected_sectors:
-        return "❌ Please select at least one sector.", empty_fig, empty_fig, empty_fig, "", dash_table.DataTable(id='empty-table', columns=[{'name': i, 'id': i} for i in ["Ticker", "Weight (%)"]], data=empty_df.to_dict('records'))
+        return "❌ Please select at least one sector.", empty_fig, empty_fig, empty_fig, "", empty_table
 
     # Build ticker list
     tickers = []
@@ -346,14 +378,14 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios):
     tickers = list(set(tickers))
     
     if len(tickers) < 2:
-        return "❌ Please select sectors with at least 2 different stocks.", empty_fig, empty_fig, empty_fig, "", dash_table.DataTable(id='empty-table', columns=[{'name': i, 'id': i} for i in ["Ticker", "Weight (%)"]], data=empty_df.to_dict('records'))
+        return "❌ Please select sectors with at least 2 different stocks.", empty_fig, empty_fig, empty_fig, "", empty_table
 
     # Run Optimization
     try:
         df, optimal_portfolio, returns, final_tickers = monte_carlo_simulation(tickers, num_portfolios, risk_tolerance)
         
         if df is None:
-            return "❌ Unable to fetch market data or perform simulation. Try again or check sector selection.", empty_fig, empty_fig, empty_fig, "", dash_table.DataTable(id='empty-table', columns=[{'name': i, 'id': i} for i in ["Ticker", "Weight (%)"]], data=empty_df.to_dict('records'))
+            return "❌ Unable to fetch sufficient market data or perform simulation. Try different sectors/settings.", empty_fig, empty_fig, empty_fig, "", empty_table
 
         # 1. Plots
         frontier_plot = create_efficient_frontier_plot(df, optimal_portfolio)
@@ -365,21 +397,23 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios):
         volatility = optimal_portfolio['Volatility']
         sharpe_ratio = optimal_portfolio['Sharpe Ratio']
         
-        risk_level = "🟢 Low Risk" if volatility < 0.15 else "🟡 Moderate Risk" if volatility < 0.25 else "🔴 High Risk"
+        risk_level = "Low Risk (Conservative)" if volatility < 0.15 else "Moderate Risk (Balanced)" if volatility < 0.25 else "High Risk (Aggressive)"
+        risk_color = "green" if volatility < 0.15 else "orange" if volatility < 0.25 else "red"
         
         summary_markdown = f"""
-- **Expected Annual Return:** {expected_return:.2%}
-- **Portfolio Volatility:** {volatility:.2%} ({risk_level})
-- **Sharpe Ratio:** {sharpe_ratio:.4f}
-- **Assets Analyzed:** {len(final_tickers)}
-- **Simulation Count:** {num_portfolios:,}
+| Metric | Value |
+| :--- | :--- |
+| **Expected Annual Return** | `{expected_return:.2%}` |
+| **Portfolio Volatility** | `{volatility:.2%}` |
+| **Sharpe Ratio** | `{sharpe_ratio:.4f}` |
+| **Risk Profile** | <span style="color:{risk_color}; font-weight:bold;">{risk_level}</span> |
 """
 
         # 3. Allocation Table
         allocation_data = []
         for ticker in final_tickers:
             weight_col = f'{ticker}_Weight'
-            if weight_col in optimal_portfolio:
+            if weight_col in optimal_portfolio and optimal_portfolio[weight_col] > 0.001:
                 allocation_data.append({
                     'Ticker': ticker,
                     'Weight (%)': f"{optimal_portfolio[weight_col]*100:.2f}"
@@ -394,20 +428,22 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios):
                 {"name": "Weight (%)", "id": "Weight (%)"},
             ],
             data=allocation_df.to_dict('records'),
-            style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'},
+            style_header={'backgroundColor': '#1f77b4', 'fontWeight': 'bold', 'color': 'white'},
             style_data_conditional=[
                 {'if': {'column_id': 'Weight (%)'}, 'textAlign': 'right'},
+                {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgb(248, 248, 248)'}
             ]
         )
         
-        status_message = f"✅ Analysis complete! Optimal Portfolio found with Sharpe Ratio: {sharpe_ratio:.4f}"
+        status_message = f"✅ Success! Analysis complete for {len(final_tickers)} stocks. Max Sharpe Ratio: {sharpe_ratio:.4f}"
         
         return status_message, frontier_plot, allocation_plot, correlation_plot, summary_markdown, allocation_table
 
     except Exception as e:
-        error_message = f"❌ An unexpected error occurred: {str(e)}"
+        error_message = f"❌ An unexpected runtime error occurred: {str(e)}"
         print(f"Error in main callback: {e}")
-        return error_message, empty_fig, empty_fig, empty_fig, "", dash_table.DataTable(id='empty-table', columns=[{'name': i, 'id': i} for i in ["Ticker", "Weight (%)"]], data=empty_df.to_dict('records'))
+        return error_message, empty_fig, empty_fig, empty_fig, "", empty_table
 
 if __name__ == '__main__':
+    # Running locally uses the internal Dash/Flask server on port 8050
     app.run_server(debug=True)
