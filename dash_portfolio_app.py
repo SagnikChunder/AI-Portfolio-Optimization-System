@@ -81,12 +81,13 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
 
         # Clean data
         data = data.dropna(axis=0)
+        # Ensure we have at least 2 columns (for correlation) and sufficient data
         if len(data) < 100 or len(data.columns) < 2:
             return None, None, None, None
 
         returns = data.pct_change().dropna()
 
-        if returns.empty:
+        if returns.empty or len(returns.columns) < 2:
             return None, None, None, None
 
         mean_returns = returns.mean() * 252
@@ -95,10 +96,11 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
         if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
             return None, None, None, None
 
-        results = np.zeros((num_portfolios, 3 + len(tickers)))
+        results = np.zeros((num_portfolios, 3 + len(data.columns)))
+        sim_tickers = data.columns.tolist() # Use the tickers present in the data
 
         for i in range(num_portfolios):
-            weights = np.random.random(len(tickers))
+            weights = np.random.random(len(sim_tickers))
             weights /= np.sum(weights)
 
             # Calculate portfolio metrics
@@ -112,7 +114,7 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
             results[i, 2] = sharpe_ratio
             results[i, 3:] = weights
 
-        columns = ['Return', 'Volatility', 'Sharpe Ratio'] + [f'{ticker}_Weight' for ticker in data.columns]
+        columns = ['Return', 'Volatility', 'Sharpe Ratio'] + [f'{ticker}_Weight' for ticker in sim_tickers]
         df = pd.DataFrame(results, columns=columns)
 
         # Remove invalid results
@@ -127,7 +129,8 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
 
         return df, optimal_portfolio, returns, data
 
-    except Exception:
+    except Exception as e:
+        print(f"Error in monte_carlo_simulation: {e}")
         return None, None, None, None
 
 def generate_investment_report(optimal_portfolio, tickers, investment_amount):
@@ -195,7 +198,7 @@ def generate_investment_report(optimal_portfolio, tickers, investment_amount):
         """
 
         return report_df, summary_stats
-    except Exception as e:
+    except Exception:
         return pd.DataFrame(), "Error generating report."
 
 # --- Plotly Visualization Functions ---
@@ -203,7 +206,7 @@ def generate_investment_report(optimal_portfolio, tickers, investment_amount):
 def create_efficient_frontier_plot(df, optimal_portfolio, tickers):
     """Create efficient frontier visualization using Plotly"""
     if df is None or df.empty:
-        return go.Figure().update_layout(title="Efficient Frontier - Insufficient Data")
+        return go.Figure().update_layout(title="Efficient Frontier - Insufficient Data", height=500)
 
     fig = px.scatter(
         df,
@@ -240,16 +243,20 @@ def create_efficient_frontier_plot(df, optimal_portfolio, tickers):
 def create_allocation_pie_chart(optimal_portfolio, tickers):
     """Create portfolio allocation pie chart using Plotly"""
     if optimal_portfolio is None:
-        return go.Figure().update_layout(title="Allocation - No Optimal Portfolio")
+        return go.Figure().update_layout(title="Allocation - No Optimal Portfolio", height=500)
 
     try:
         weights = []
         valid_tickers = []
         other_weight = 0
 
-        for ticker in tickers:
-            weight_col = f'{ticker}_Weight'
-            weight = optimal_portfolio.get(weight_col, 0)
+        # Filter tickers that actually contributed to the optimal portfolio
+        sim_tickers = [t for t in optimal_portfolio.index if t.endswith('_Weight')]
+
+        for col in sim_tickers:
+            ticker = col.replace('_Weight', '')
+            weight = optimal_portfolio.get(col, 0)
+
             if weight > 0.001:
                 if weight > 0.02:  # Show only weights > 2%
                     weights.append(weight)
@@ -262,12 +269,13 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
             valid_tickers.append('Others')
 
         if not weights:
-            return go.Figure().update_layout(title="Allocation - No Significant Weights")
+            return go.Figure().update_layout(title="Allocation - No Significant Weights", height=500)
 
         fig = go.Figure(data=[go.Pie(
             labels=valid_tickers,
             values=weights,
-            hovertemplate='%{label}<br>Weight: %{value:.2%}<extra></extra>'
+            hovertemplate='%{label}<br>Weight: %{value:.2%}<extra></extra>',
+            textinfo='label+percent'
         )])
 
         fig.update_layout(
@@ -277,15 +285,16 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
         )
         return fig
     except Exception:
-        return go.Figure().update_layout(title="Allocation - Error")
+        return go.Figure().update_layout(title="Allocation - Error", height=500)
 
-def create_correlation_heatmap(returns, tickers):
+def create_correlation_heatmap(returns):
     """Create correlation heatmap using Plotly"""
-    if returns is None or returns.empty:
-        return go.Figure().update_layout(title="Correlation Matrix - No Data")
+    if returns is None or returns.empty or len(returns.columns) < 2:
+        return go.Figure().update_layout(title="Stock Correlation Matrix - No Data (Need at least 2 stocks)", height=600)
 
     try:
         correlation_matrix = returns.corr()
+
         fig = go.Figure(data=go.Heatmap(
             z=correlation_matrix.values,
             x=correlation_matrix.columns,
@@ -294,26 +303,41 @@ def create_correlation_heatmap(returns, tickers):
             zmin=-1, zmax=1
         ))
 
+        # Add annotations (correlation values)
+        annotations = []
+        for i in range(len(correlation_matrix.index)):
+            for j in range(len(correlation_matrix.columns)):
+                annotations.append(go.layout.Annotation(
+                    text=f'{correlation_matrix.iloc[i, j]:.2f}',
+                    x=correlation_matrix.columns[j],
+                    y=correlation_matrix.index[i],
+                    xref='x1', yref='y1',
+                    showarrow=False,
+                    font=dict(color='black' if abs(correlation_matrix.iloc[i, j]) < 0.5 else 'white')
+                ))
+
         fig.update_layout(
             title='Stock Correlation Matrix',
             xaxis_title='Ticker',
             yaxis_title='Ticker',
             template="plotly_white",
+            annotations=annotations,
             height=600
         )
         return fig
-    except Exception:
-        return go.Figure().update_layout(title="Correlation Matrix - Error")
+    except Exception as e:
+        print(f"Error creating correlation heatmap: {e}")
+        return go.Figure().update_layout(title="Stock Correlation Matrix - Error", height=600)
 
 def create_performance_plot(data):
     """Create normalized price evolution plot using Plotly"""
     if data is None or data.empty or len(data.columns) < 2:
-        return go.Figure().update_layout(title="Price Evolution - No Data")
+        return go.Figure().update_layout(title="Price Evolution - No Data", height=500)
 
     try:
         data_clean = data.dropna()
         if len(data_clean) < 10:
-             return go.Figure().update_layout(title="Price Evolution - Insufficient Data Points")
+             return go.Figure().update_layout(title="Price Evolution - Insufficient Data Points", height=500)
 
         normalized_prices = data_clean / data_clean.iloc[0] * 100
 
@@ -329,11 +353,12 @@ def create_performance_plot(data):
             xaxis_title='Date',
             yaxis_title='Normalized Price',
             template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=500
         )
         return fig
     except Exception:
-        return go.Figure().update_layout(title="Price Evolution - Error")
+        return go.Figure().update_layout(title="Price Evolution - Error", height=500)
 
 
 # --- Dash App Layout and Callbacks ---
@@ -369,6 +394,7 @@ app.layout = html.Div(style={'padding': '20px'}, children=[
         html.Div(className='three columns', children=[
             html.Label("Monte Carlo Simulations"),
             dcc.Input(id='num-portfolios', type='number', value=10000, min=1000, max=50000, step=1000, style={'width': '100%'}),
+            html.Br(),
             html.Label("Investment Amount ($)"),
             dcc.Input(id='investment-amount', type='number', value=10000, min=1, step=1000, style={'width': '100%'})
         ])
@@ -447,18 +473,20 @@ app.layout = html.Div(style={'padding': '20px'}, children=[
      dash.State('investment-amount', 'value')]
 )
 def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios, investment_amount):
+    # Default empty figure
+    empty_fig = go.Figure().update_layout(title="Run Optimization to See Results", height=500)
+    empty_corr_fig = go.Figure().update_layout(title="Run Optimization to See Results", height=600)
+
     if n_clicks is None or n_clicks == 0:
-        # Initial state: return empty figures
-        empty_fig = go.Figure().update_layout(title="Run Optimization to See Results")
-        return "", "", [], empty_fig, empty_fig, empty_fig, empty_fig
+        return "", "", [], empty_fig, empty_fig, empty_corr_fig, empty_fig
 
     # Input validation
     if not selected_sectors:
-        return "Error: Please select at least one sector.", "", [], go.Figure(), go.Figure(), go.Figure(), go.Figure()
+        return "Error: Please select at least one sector.", "", [], empty_fig, empty_fig, empty_corr_fig, empty_fig
     if investment_amount is None or investment_amount <= 0:
-        return "Error: Investment amount must be positive.", "", [], go.Figure(), go.Figure(), go.Figure(), go.Figure()
+        return "Error: Investment amount must be positive.", "", [], empty_fig, empty_fig, empty_corr_fig, empty_fig
     if num_portfolios is None or num_portfolios < 1000:
-        return "Error: Number of simulations must be at least 1000.", "", [], go.Figure(), go.Figure(), go.Figure(), go.Figure()
+        return "Error: Number of simulations must be at least 1000.", "", [], empty_fig, empty_fig, empty_corr_fig, empty_fig
 
     # Get selected tickers
     all_tickers = []
@@ -469,7 +497,7 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios, in
     tickers = list(set(all_tickers))
 
     if len(tickers) < 2:
-        return "Error: Please select sectors with at least 2 different stocks.", "", [], go.Figure(), go.Figure(), go.Figure(), go.Figure()
+        return "Error: Please select sectors with at least 2 different stocks.", "", [], empty_fig, empty_fig, empty_corr_fig, empty_fig
 
     # Limit tickers for efficiency
     if len(tickers) > 8:
@@ -488,10 +516,12 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios, in
     # Generate Plots (using Plotly functions)
     frontier_fig = create_efficient_frontier_plot(df, optimal_portfolio, tickers)
     allocation_fig = create_allocation_pie_chart(optimal_portfolio, tickers)
-    correlation_fig = create_correlation_heatmap(returns, tickers)
+    
+    # Use returns for correlation matrix
+    correlation_fig = create_correlation_heatmap(returns)
     performance_fig = create_performance_plot(data)
 
-    status_message = f"Analysis complete for {len(tickers)} stocks. Optimal Portfolio Sharpe Ratio: {optimal_portfolio['Sharpe Ratio']:.4f}"
+    status_message = f"Analysis complete for {len(data.columns)} stocks. Optimal Portfolio Sharpe Ratio: {optimal_portfolio['Sharpe Ratio']:.4f}"
 
     return status_message, summary_stats, report_df.to_dict('records'), frontier_fig, allocation_fig, correlation_fig, performance_fig
 
