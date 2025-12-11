@@ -79,10 +79,14 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
         if data.empty:
             return None, None, None, None
 
-        # Clean data
-        data = data.dropna(axis=0)
-        # Ensure we have at least 2 columns (for correlation) and sufficient data
-        if len(data) < 100 or len(data.columns) < 2:
+        # --- CRITICAL FIX: Ensure Data is Cleaned and Sufficient ---
+        data = data.dropna(axis=0) # Drop rows with NaN
+        data = data.dropna(axis=1, thresh=len(data)*0.9) # Drop columns (tickers) with too many NaNs
+
+        # Get the actual tickers that survived data cleaning
+        sim_tickers = data.columns.tolist() 
+
+        if len(data) < 100 or len(sim_tickers) < 2:
             return None, None, None, None
 
         returns = data.pct_change().dropna()
@@ -90,17 +94,18 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
         if returns.empty or len(returns.columns) < 2:
             return None, None, None, None
 
+        # Recalculate mean/cov based on cleaned returns
         mean_returns = returns.mean() * 252
         cov_matrix = returns.cov() * 252
 
         if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
             return None, None, None, None
 
-        results = np.zeros((num_portfolios, 3 + len(data.columns)))
-        sim_tickers = data.columns.tolist() # Use the tickers present in the data
+        num_assets = len(sim_tickers)
+        results = np.zeros((num_portfolios, 3 + num_assets))
 
         for i in range(num_portfolios):
-            weights = np.random.random(len(sim_tickers))
+            weights = np.random.random(num_assets)
             weights /= np.sum(weights)
 
             # Calculate portfolio metrics
@@ -114,6 +119,7 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
             results[i, 2] = sharpe_ratio
             results[i, 3:] = weights
 
+        # CRITICAL FIX: Use sim_tickers for column naming
         columns = ['Return', 'Volatility', 'Sharpe Ratio'] + [f'{ticker}_Weight' for ticker in sim_tickers]
         df = pd.DataFrame(results, columns=columns)
 
@@ -133,36 +139,40 @@ def monte_carlo_simulation(tickers, num_portfolios=10000, risk_tolerance=0.2):
         print(f"Error in monte_carlo_simulation: {e}")
         return None, None, None, None
 
-def generate_investment_report(optimal_portfolio, tickers, investment_amount):
-    """Generate detailed investment report and summary stats"""
+def generate_investment_report(optimal_portfolio, all_input_tickers, investment_amount):
+    """Generate detailed investment report and summary stats, using all_input_tickers for comprehensive report."""
     try:
-        # Get weights safely, matching the order of tickers used in the simulation
-        weights_dict = {f'{t}_Weight': optimal_portfolio.get(f'{t}_Weight', 0) for t in tickers}
-        weights = [weights_dict[f'{t}_Weight'] for t in tickers]
+        # Get weights safely, including only tickers that were successfully optimized
+        weights_dict = {col: optimal_portfolio.get(col, 0) for col in optimal_portfolio.index if col.endswith('_Weight')}
+        
+        # Extract the list of tickers that were actually used in the simulation
+        sim_tickers = [col.replace('_Weight', '') for col in weights_dict.keys()]
+        weights = [weights_dict[f'{t}_Weight'] for t in sim_tickers]
         allocations = [weight * investment_amount for weight in weights]
 
         # Get current prices for share calculations
         current_prices = {}
         shares = {}
 
-        for ticker in tickers:
+        for ticker in sim_tickers:
             try:
                 stock = yf.Ticker(ticker)
-                # Use info for faster retrieval of current price
                 price = stock.info.get('regularMarketPrice')
                 if price is not None and price > 0:
                     current_prices[ticker] = price
-                    shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
+                    # Find the corresponding allocation index
+                    idx = sim_tickers.index(ticker)
+                    shares[ticker] = max(0, int(allocations[idx] / current_prices[ticker]))
                 else:
                     current_prices[ticker] = 100.0  # Default fallback
-                    shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
+                    shares[ticker] = 0
             except Exception:
                 current_prices[ticker] = 100.0
-                shares[ticker] = max(0, int(allocations[tickers.index(ticker)] / current_prices[ticker]))
+                shares[ticker] = 0
 
         # Create report dataframe
         report_data = []
-        for i, ticker in enumerate(tickers):
+        for i, ticker in enumerate(sim_tickers):
             if weights[i] > 0.001: # Only include tickers with significant weight
                 report_data.append({
                     'Ticker': ticker,
@@ -198,12 +208,13 @@ def generate_investment_report(optimal_portfolio, tickers, investment_amount):
         """
 
         return report_df, summary_stats
-    except Exception:
+    except Exception as e:
+        print(f"Error generating investment report: {e}")
         return pd.DataFrame(), "Error generating report."
 
 # --- Plotly Visualization Functions ---
 
-def create_efficient_frontier_plot(df, optimal_portfolio, tickers):
+def create_efficient_frontier_plot(df, optimal_portfolio):
     """Create efficient frontier visualization using Plotly"""
     if df is None or df.empty:
         return go.Figure().update_layout(title="Efficient Frontier - Insufficient Data", height=500)
@@ -240,7 +251,7 @@ def create_efficient_frontier_plot(df, optimal_portfolio, tickers):
     )
     return fig
 
-def create_allocation_pie_chart(optimal_portfolio, tickers):
+def create_allocation_pie_chart(optimal_portfolio):
     """Create portfolio allocation pie chart using Plotly"""
     if optimal_portfolio is None:
         return go.Figure().update_layout(title="Allocation - No Optimal Portfolio", height=500)
@@ -250,19 +261,17 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
         valid_tickers = []
         other_weight = 0
 
-        # Filter tickers that actually contributed to the optimal portfolio
-        sim_tickers = [t for t in optimal_portfolio.index if t.endswith('_Weight')]
-
-        for col in sim_tickers:
+        # Filter and normalize weights for the pie chart
+        weights_series = optimal_portfolio[optimal_portfolio.index.str.endswith('_Weight')]
+        weights_series = weights_series[weights_series > 0.001]
+        
+        for col, weight in weights_series.items():
             ticker = col.replace('_Weight', '')
-            weight = optimal_portfolio.get(col, 0)
-
-            if weight > 0.001:
-                if weight > 0.02:  # Show only weights > 2%
-                    weights.append(weight)
-                    valid_tickers.append(ticker)
-                else:
-                    other_weight += weight
+            if weight > 0.02:  # Show only weights > 2%
+                weights.append(weight)
+                valid_tickers.append(ticker)
+            else:
+                other_weight += weight
 
         if other_weight > 0.001:
             weights.append(other_weight)
@@ -289,6 +298,7 @@ def create_allocation_pie_chart(optimal_portfolio, tickers):
 
 def create_correlation_heatmap(returns):
     """Create correlation heatmap using Plotly"""
+    # CRITICAL FIX: Check for returns validity here
     if returns is None or returns.empty or len(returns.columns) < 2:
         return go.Figure().update_layout(title="Stock Correlation Matrix - No Data (Need at least 2 stocks)", height=600)
 
@@ -370,6 +380,8 @@ app.title = "AI Portfolio Optimization"
 app.layout = html.Div(style={'padding': '20px'}, children=[
     html.H1("AI-Powered Portfolio Management Assistant", style={'textAlign': 'center'}),
     html.P("Professional-grade portfolio optimization using Modern Portfolio Theory and Monte Carlo simulation.", style={'textAlign': 'center', 'marginBottom': '20px'}),
+    
+    #  
 
     # Configuration Row
     html.Div(className='row', style={'marginBottom': '20px'}, children=[
@@ -507,15 +519,15 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios, in
     df, optimal_portfolio, returns, data = monte_carlo_simulation(tickers, num_portfolios, risk_tolerance)
 
     if df is None or optimal_portfolio is None:
-        error_fig = go.Figure().update_layout(title="Data Error: Could not fetch data or optimize portfolio.")
-        return "Error: Unable to fetch market data or optimize portfolio. Try again with different sectors.", "", [], error_fig, error_fig, error_fig, error_fig
+        error_fig = go.Figure().update_layout(title="Data Error: Could not fetch sufficient market data or optimize portfolio. Try again with fewer sectors or different time.", height=500)
+        return "Error: Unable to fetch sufficient market data or optimize portfolio.", "", [], error_fig, error_fig, error_fig, error_fig
 
     # Generate Report
     report_df, summary_stats = generate_investment_report(optimal_portfolio, tickers, investment_amount)
 
     # Generate Plots (using Plotly functions)
-    frontier_fig = create_efficient_frontier_plot(df, optimal_portfolio, tickers)
-    allocation_fig = create_allocation_pie_chart(optimal_portfolio, tickers)
+    frontier_fig = create_efficient_frontier_plot(df, optimal_portfolio)
+    allocation_fig = create_allocation_pie_chart(optimal_portfolio)
     
     # Use returns for correlation matrix
     correlation_fig = create_correlation_heatmap(returns)
@@ -527,4 +539,5 @@ def update_output(n_clicks, selected_sectors, risk_tolerance, num_portfolios, in
 
 # Run the app
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    # Use a specific port to avoid conflicts
+    app.run_server(debug=True, port=8050)
