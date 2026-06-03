@@ -1,0 +1,20 @@
+# Core app
+dash==2.17.1
+plotly==5.22.0
+gunicorn==22.0.0
+
+# Data
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+
+# yfinance + ALL its required dependencies (explicit to avoid build failures)
+yfinance==0.2.40
+multitasking==0.0.11
+beautifulsoup4==4.12.3
+peewee==3.17.6
+protobuf==4.25.3
+websockets==12.0
+requests==2.31.0
+pytz==2024.1
+platformdirs==4.2.2
