@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import warnings
 from datetime import datetime
@@ -540,4 +541,7 @@ def run_analysis(n_clicks, ticker_text, start_date, end_date, split_date, invest
 
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    # Render assigns a dynamic port. If it doesn't exist, default to 8050.
+    port = int(os.environ.get("PORT", 8050))
+    # 0.0.0.0 allows Render's external health checks to reach your app
+    app.run(host="0.0.0.0", port=port, debug=False)
